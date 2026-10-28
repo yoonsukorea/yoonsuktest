@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run existing household app server",
+			"type": "shell",
+			"command": "node",
+			"args": [
+				"server.mjs"
+			],
+			"isBackground": true,
+			"problemMatcher": [
+				"$node"
+			],
+			"group": "build"
+		}
+	]
+}

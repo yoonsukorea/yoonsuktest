@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: moa-household
+    runtime: node
+    plan: free
+    buildCommand: node --check server.mjs && node --check service-worker.js
+    startCommand: node server.mjs
+    healthCheckPath: /healthz
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false

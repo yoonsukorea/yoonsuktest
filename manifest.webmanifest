@@ -1,0 +1,18 @@
+{
+	"name": "모아 | 나만의 가계부",
+	"short_name": "모아",
+	"description": "나만의 가계부와 자산 관리",
+	"lang": "ko-KR",
+	"start_url": "/",
+	"display": "standalone",
+	"background_color": "#f4f6f1",
+	"theme_color": "#f4f6f1",
+	"icons": [
+		{
+			"src": "/app-icon.svg",
+			"sizes": "any",
+			"type": "image/svg+xml",
+			"purpose": "any maskable"
+		}
+	]
+}
