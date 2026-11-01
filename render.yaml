@@ -11,3 +11,5 @@ services:
         sync: false
       - key: SUPABASE_ANON_KEY
         sync: false
+      - key: TOSS_ALLOWED_USER_ID
+        sync: false

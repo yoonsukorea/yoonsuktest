@@ -1,23 +1,28 @@
 # yoonsuktest
 윤석 프로젝트 테스트
 
-## Toss Securities stock quotes
+## Toss Securities account and stock data
 
-The app's stock section uses the read-only Toss Securities Open API. The server
-does not expose account, order, or trading endpoints. Once Supabase is
-configured, stock holdings are included in the signed-in user's synchronized
-household document; quote credentials stay on the server.
+The existing app uses the read-only Toss Securities Open API for Korean and
+U.S. stock quotes, USD/KRW exchange rates, and the signed-in owner's brokerage
+account and holdings. It does not expose order or trading endpoints. Manual
+Kiwoom holdings and imported Toss holdings are stored separately in the user's
+existing Supabase household document; quote credentials remain server-side.
 
 ### Local setup
 
 1. Install Node.js 20.6 or newer.
 2. Copy `.env.example` to `.env` and set `TOSS_CLIENT_ID` and
 	`TOSS_CLIENT_SECRET`. Never commit `.env` or put these values in `index.html`.
-3. In the Toss Securities WTS, register the server's outbound IP under the
+3. Set `TOSS_ALLOWED_USER_ID` to the UUID of the one Supabase Auth user allowed
+	to view the connected Toss account. Find it in Supabase **Authentication →
+	Users**. This server-side allowlist prevents other household sign-ins from
+	seeing the brokerage account.
+4. In the Toss Securities WTS, register the server's outbound IP under the
 	Open API allowed-IP settings. Local development may use a changing IP, so a
 	deployed server with a stable outbound IP is recommended.
-4. Start the server with `node --env-file=.env server.mjs`.
-5. Open `http://localhost:8000`.
+5. Start the server with `node --env-file=.env server.mjs`.
+6. Open `http://localhost:8000`.
 
 For deployment, run `server.mjs` on a Node.js host that supports private
 environment variables and serves the app from the same origin. GitHub Pages
@@ -29,6 +34,11 @@ API documents a price timestamp but do not state a guaranteed delay in the
 overview, so the app does not promise exchange-grade real-time delivery. When
 quotes are unavailable, existing holdings and the last saved quote remain
 visible. U.S. prices use the Toss USD/KRW reference rate for won conversion.
+The asset view's connection test checks OAuth, Samsung Electronics (`005930`),
+Apple (`AAPL`), and the exchange rate. Authenticated account lookup uses
+`GET /api/v1/accounts`; holdings use `GET /api/v1/holdings` with the selected
+`X-Tossinvest-Account` value. Account and holdings requests require the
+Supabase session and the matching `TOSS_ALLOWED_USER_ID`.
 
 ## Supabase login and cloud sync
 
@@ -67,13 +77,10 @@ supporting browsers. Installation requires HTTPS (or localhost); the service
 worker caches the app shell only and does not cache API responses or synchronize
 private data.
 
-Production readiness still requires deploying this Node server with the
-Supabase public environment values, configuring the Site URL / redirect URL,
-and migrating the local state from the browser that contains the existing
-records. A production Toss integration also needs a stable outbound IP
-registered in Toss Securities Open API settings and the Toss client secret in
-the host's secret manager. No production host, domain, credentials, or
-account-level API permission is configured by this repository.
+Production readiness still requires configuring the Supabase Site URL /
+redirect URL, setting the authorized Supabase user UUID, and registering the
+Render server's actual outbound IP in Toss Securities Open API settings. API
+credentials and the user allowlist are private Render environment values.
 
 ## Render deployment
 
@@ -91,7 +98,8 @@ the Codespaces origin's records. Keep using the original URL until the backup
 has been verified and imported into your authenticated Supabase account. In
 Render, connect the existing `yoonsukorea/yoonsuktest` repository and select
 **Blueprint** / `render.yaml`; provide `SUPABASE_URL` and
-`SUPABASE_ANON_KEY` as private environment values. Do not add a service-role
+`SUPABASE_ANON_KEY`, `TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, and
+`TOSS_ALLOWED_USER_ID` as private environment values. Do not add a service-role
 key. Configure the resulting `https://<service>.onrender.com` address as the
 Supabase Auth Site URL and an allowed Redirect URL. Deploying itself cannot
 configure a Supabase project or move browser-local records.

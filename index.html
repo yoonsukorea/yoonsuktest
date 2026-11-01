@@ -136,7 +136,7 @@
 			["coupang", "쿠팡", "쿠팡", 7900], ["health-insurance", "건강보험료", "보험", 318130],
 			["pension-insurance", "연금보험료", "보험", 366660]
 		];
-		const defaultState = { cash: 0, accounts: [], holdings: [], transactions: [], pricesUpdated: null, fixedExpenseCycles: [], exchangeRate: null, exchangeRateUpdated: null };
+		const defaultState = { cash: 0, accounts: [], holdings: [], transactions: [], pricesUpdated: null, fixedExpenseCycles: [], exchangeRate: null, exchangeRateUpdated: null, tossAccounts: [], tossAccountSeq: null, tossLastSyncAt: null };
 		let state = loadState();
 		let activeView = "home";
 		let entryKind = "expense";
@@ -172,6 +172,7 @@
 				const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}");
 				const loaded = { ...defaultState, ...saved };
 				loaded.fixedExpenseCycles = Array.isArray(saved.fixedExpenseCycles) ? saved.fixedExpenseCycles : [];
+				loaded.tossAccounts = Array.isArray(saved.tossAccounts) ? saved.tossAccounts : [];
 				if (!Array.isArray(saved.accounts)) {
 					loaded.accounts = Number(saved.cash) > 0 ? [{ id:"legacy-cash", category:"현금·예금", label:"기존 현금·예금", amount:Number(saved.cash) }] : [];
 				}
@@ -576,6 +577,19 @@
 			return (Number(item.quantity) || 0) * (Number(item.price) || Number(item.average) || 0);
 		}
 		function totalAssets() { return accountTotal() + state.holdings.reduce((sum, item) => sum + holdingAssetKrw(item), 0); }
+		function updateHomeAssetSummary() {
+			if (activeView !== "home") return;
+			const total = document.querySelector("[data-total-assets]");
+			const cash = document.querySelector("[data-cash-total]");
+			const investment = document.querySelector("[data-investment-total]");
+			if (total) total.textContent = won(totalAssets());
+			if (cash) cash.textContent = won(accountTotal());
+			if (investment) investment.textContent = won(state.holdings.reduce((sum, item) => sum + holdingAssetKrw(item), 0));
+			document.querySelectorAll("[data-home-holding]").forEach(element => {
+				const holding = state.holdings.find(item => item.id === element.dataset.homeHolding);
+				if (holding) element.textContent = won(holdingAssetKrw(holding));
+			});
+		}
 		function stockPortfolioMetrics() {
 			const stocks = state.holdings.filter(item => item.type === "stock");
 			const priced = stocks.map(stockMetrics).filter(item => item.valueKrw !== null && item.costKrw !== null);
@@ -610,10 +624,10 @@
 			const investmentValue = state.holdings.reduce((sum, item) => sum + holdingAssetKrw(item), 0);
 			return `${renderHead("YOUR MONEY, IN ONE PLACE", "오늘의 자산")}
 				<div class="overview-grid">
-					<section class="panel net-worth"><div class="label">나의 총 자산</div><strong>${won(totalAssets())}</strong><div class="worth-foot"><span>현금·예금 <b>${won(accountTotal())}</b></span><span>투자 자산 <b>${won(investmentValue)}</b></span></div></section>
+					<section class="panel net-worth"><div class="label">나의 총 자산</div><strong data-total-assets>${won(totalAssets())}</strong><div class="worth-foot"><span>현금·예금 <b data-cash-total>${won(accountTotal())}</b></span><span>투자 자산 <b data-investment-total>${won(investmentValue)}</b></span></div></section>
 					<section class="panel asset-snapshot"><div class="panel-title"><h2>자산 요약</h2><button class="text-button" data-goto="assets">자산 관리 →</button></div>
 						<div class="asset-line"><span class="name"><i class="dot cash"></i>현금·예금</span><strong>${won(accountTotal())}</strong></div>
-						${state.holdings.length ? state.holdings.slice(0,3).map(item => `<div class="asset-line"><span class="name"><i class="dot"></i>${safe(item.name || item.symbol)}</span><strong>${won(holdingAssetKrw(item))}</strong></div>`).join("") : `<div class="asset-line"><span class="name"><i class="dot"></i>투자 자산</span><strong>보유 자산을 추가해 주세요</strong></div>`}
+						${state.holdings.length ? state.holdings.slice(0,3).map(item => `<div class="asset-line"><span class="name"><i class="dot"></i>${safe(item.name || item.symbol)}</span><strong data-home-holding="${safe(item.id)}">${won(holdingAssetKrw(item))}</strong></div>`).join("") : `<div class="asset-line"><span class="name"><i class="dot"></i>투자 자산</span><strong>보유 자산을 추가해 주세요</strong></div>`}
 					</section>
 				</div>
 				<section class="panel quick-entry"><div class="quick-intro"><h2>내역 빠르게 추가</h2><p>내용만 적으면 알맞은 카테고리로 자동 분류해요.</p></div>
@@ -658,7 +672,7 @@
 					<section class="panel report-panel"><div class="panel-title"><h2>이번 달 기록</h2></div>${items.length ? `<div class="asset-line"><span>총 기록</span><strong>${items.length}건</strong></div><div class="asset-line"><span>가장 많이 쓴 곳</span><strong>${categories[0] ? safe(categories[0][0]) : "없음"}</strong></div><div class="asset-line"><span>소득 대비 지출</span><strong>${totals.income ? Math.round(totals.expense / totals.income * 100) + "%" : "소득 기록 없음"}</strong></div><div class="connection-note">소비 내역은 입력한 내용을 기준으로 자동 분류됩니다. 분류가 맞지 않으면 제목을 더 구체적으로 적어 주세요.</div>` : `<div class="empty">아직 분석할 내역이 없어요.</div>`}</section></div>`;
 		}
 		function renderAssets() {
-			const tabs = [{ id:"upbit", label:"업비트" }, { id:"korean", label:"한국 주식 직접 입력" }, { id:"toss", label:"토스 계좌 조회" }, { id:"us", label:"미국 주식 직접 입력" }, { id:"toss-us", label:"토스 미국 계좌 조회" }];
+			const tabs = [{ id:"upbit", label:"업비트" }, { id:"korean", label:"키움증권 직접 입력 (한국)" }, { id:"toss", label:"토스 계좌 조회" }, { id:"us", label:"키움증권 직접 입력 (미국)" }, { id:"toss-us", label:"토스 미국 계좌 조회" }];
 			const stockPortfolio = stockPortfolioMetrics();
 			const visible = state.holdings.filter(item => {
 				if (activeAssetTab === "upbit") return item.type !== "stock";
@@ -669,7 +683,7 @@
 			});
 			const rows = visible.map(item => {
 				const isStock = item.type === "stock";
-				const label = !isStock ? `업비트 · ${item.market}` : item.source === "account" ? "토스 계좌 조회" : `${item.market === "US" ? "미국" : "한국"} 주식 직접 입력`;
+				const label = !isStock ? `업비트 · ${item.market}` : item.source === "account" ? "토스 계좌 조회" : item.broker === "kiwoom" ? `키움증권 · ${item.market === "US" ? "미국" : "한국"} 주식` : `${item.market === "US" ? "미국" : "한국"} 주식 직접 입력`;
 				if (!isStock) return `<tr><td><strong>${safe(item.name || item.symbol)}</strong><div class="status-line">${safe(label)}</div></td><td>${Number(item.quantity).toLocaleString("ko-KR", { maximumFractionDigits: 8 })}</td><td>${won(item.average)}</td><td>${item.price ? won(item.price) : "시세 대기"}</td><td><strong>${won(holdingAssetKrw(item))}</strong></td><td><button class="delete-btn" data-asset-delete="${safe(item.id)}" aria-label="${safe(item.name || item.symbol)} 삭제">×</button></td></tr>`;
 				if (editingHoldingId === item.id) return `<tr><td colspan="8"><form class="asset-form holding-edit-form" data-holding-row="${safe(item.id)}"><input class="field" data-holding-name value="${safe(item.name)}" aria-label="종목명" required maxlength="80"><input class="field" data-holding-symbol value="${safe(item.symbol)}" aria-label="종목 코드" required maxlength="20"><input class="field" data-holding-quantity type="number" min="0.000001" step="any" value="${Number(item.quantity)}" aria-label="보유 수량" required><input class="field" data-holding-average type="number" min="0.000001" step="any" value="${Number(item.average)}" aria-label="평균 매수가" required><button class="primary" type="button" data-holding-save="${safe(item.id)}">저장</button><button class="text-button" type="button" data-holding-cancel>취소</button></form></td></tr>`;
 				const metrics = stockMetrics(item);
@@ -691,12 +705,15 @@
 			const query = stockSearchResults;
 			const stockSearchForm = `<form id="stock-search-form" class="asset-form stock-search-form"><input class="field" name="query" id="stock-search-query" placeholder="${searchMarket === "US" ? "종목명 또는 티커 (Apple, AAPL)" : "종목명 또는 코드 (삼성전자, 005930)"}" autocomplete="off" required><button class="primary" type="submit">종목 찾기</button></form><div class="stock-search-results">${query.map(item => `<button type="button" class="stock-result" data-stock-symbol="${safe(item.symbol)}" data-stock-name="${safe(item.name)}" data-stock-market="${searchMarket}" data-stock-currency="${searchMarket === "US" ? "USD" : "KRW"}"><strong>${safe(item.name)}</strong><span>${safe(item.symbol)} · ${safe(item.market)}</span></button>`).join("")}</div>`;
 			const stockEntryForm = selectedStock && selectedStock.market === searchMarket ? `<form id="stock-asset-form" class="asset-form stock-form"><div class="selected-stock"><strong>${safe(selectedStock.name)}</strong><span>${safe(selectedStock.symbol)} · ${selectedStock.currency === "USD" ? "미국 · USD" : "한국 · KRW"}</span><button type="button" class="text-button" data-clear-stock>다시 선택</button></div><input class="field" name="quantity" type="number" min="0.000001" step="any" placeholder="보유 수량" required><input class="field" name="average" type="number" min="0.000001" step="any" placeholder="평단가 (${selectedStock.currency === "USD" ? "USD" : "원"})" required><button class="primary" type="submit">보유 추가</button></form>` : stockSearchForm;
-			const stockManualForm = `<form id="stock-manual-form" class="asset-form stock-manual-form"><input class="field" name="name" placeholder="직접 등록 종목명" maxlength="80" required><input class="field" name="symbol" placeholder="${searchMarket === "US" ? "티커 (예: AAPL)" : "종목 코드 (예: 005930)"}" maxlength="20" required><input class="field" name="quantity" type="number" min="0.000001" step="any" placeholder="보유 수량" required><input class="field" name="average" type="number" min="0.000001" step="any" placeholder="평균 매수가 (${searchMarket === "US" ? "USD" : "원"})" required><button class="primary" type="submit">직접 등록</button></form>`;
+			const stockManualForm = `<form id="stock-manual-form" class="asset-form stock-manual-form"><input class="field" name="name" placeholder="키움증권 종목명" maxlength="80" required><input class="field" name="symbol" placeholder="${searchMarket === "US" ? "티커 (예: AAPL)" : "종목 코드 (예: 005930)"}" maxlength="20" required><input class="field" name="quantity" type="number" min="0.000001" step="any" placeholder="보유 수량" required><input class="field" name="average" type="number" min="0.000001" step="any" placeholder="평균 매수가 (${searchMarket === "US" ? "USD" : "원"})" required><button class="primary" type="submit">키움 보유 추가</button></form>`;
+			const isTossTab = activeAssetTab === "toss" || activeAssetTab === "toss-us";
+			const tossAccountOptions = state.tossAccounts.map(account => `<option value="${safe(account.accountSeq)}" ${String(state.tossAccountSeq) === String(account.accountSeq) ? "selected" : ""}>${safe(account.accountNo || "계좌")} · ${safe(account.accountType || "")}</option>`).join("");
+			const tossAccountPanel = isTossTab ? `<div class="asset-form account-form"><select class="field" id="toss-account-select" aria-label="토스증권 계좌">${tossAccountOptions || `<option value="">계좌 목록을 먼저 조회해 주세요</option>`}</select><button class="text-button" type="button" data-toss-accounts>계좌 조회</button><button class="primary" type="button" data-toss-sync ${state.tossAccountSeq ? "" : "disabled"}>보유 종목 갱신</button><button class="text-button" type="button" data-toss-diagnostics>인증·시세 테스트</button></div><div class="status-line">마지막 계좌 연동 ${state.tossLastSyncAt ? new Date(state.tossLastSyncAt).toLocaleString("ko-KR") : "없음"} · 조회 전용</div>` : "";
 			const connectionNote = isUpbit
 				? "업비트 계정 잔고 연동은 아직 연결되지 않았습니다. 코인 보유 수량은 직접 입력해 주세요."
-				: activeAssetTab === "toss" || activeAssetTab === "toss-us"
-					? "토스 계좌 조회 연동은 아직 설정되지 않았습니다. 기존 직접 입력 종목은 직접 입력 탭에서 확인할 수 있습니다. 계좌 연동 자료가 없으므로 이 탭의 데이터는 저장하지 않습니다."
-					: `${selectedTab.label} 보유 종목은 이 브라우저에 저장됩니다. 검색하거나 종목명·코드로 직접 등록하고, 저장한 보유 정보는 수정할 수 있습니다. ${stockApiStatus}`;
+				: isTossTab
+					? "로그인한 Supabase 가계부 계정의 토스증권 보유 종목을 조회합니다. 종목은 계좌별로 저장되며 매매 기능은 제공하지 않습니다."
+					: `${selectedTab.label} 보유 종목은 Supabase 가계부에 저장되며, 토스증권 시세 API에서 현재가를 조회합니다. ${stockApiStatus}`;
 			const portfolioValue = formatCurrency(stockPortfolio.value, "KRW");
 			const portfolioCost = formatCurrency(stockPortfolio.cost, "KRW");
 			const portfolioProfitClass = stockPortfolio.profit >= 0 ? "stock-gain" : "stock-loss";
@@ -708,7 +725,7 @@
 				</section>
 				<nav class="asset-tabs" aria-label="투자 자산 계좌">${portfolioTabs}</nav>
 				<section class="panel section-wrap" style="margin-top:12px"><div class="panel-title"><h2>${selectedTab.label}</h2><span class="status-line" id="price-status">${isUpbit ? `${safe(priceStreamStatus)} · ${updated}` : safe(stockApiStatus)}</span></div>
-					${isUpbit ? coinForm : activeAssetTab === "toss" || activeAssetTab === "toss-us" ? "" : `${stockEntryForm}${stockManualForm}`}
+					${isUpbit ? coinForm : isTossTab ? tossAccountPanel : `${stockEntryForm}${stockManualForm}`}
 					<div class="connection-note">${connectionNote}</div>
 					${!isUpbit ? `<div class="stock-totals"><div><span>총 매입금액</span><strong>${portfolioCost}</strong></div><div><span>총 평가금액</span><strong>${portfolioValue}</strong></div><div><span>총 평가손익</span><strong class="${portfolioProfitClass}">${stockPortfolio.pricedCount ? `${stockPortfolio.profit >= 0 ? "+" : "−"}${won(Math.abs(stockPortfolio.profit))}` : "시세 대기"}</strong></div><div><span>총 수익률</span><strong class="${portfolioProfitClass}">${portfolioReturn}</strong></div></div>${stockPortfolio.waitingCount ? `<div class="status-line">시세 미조회 ${stockPortfolio.waitingCount}종목 · 기존 보유 내역은 유지됩니다.</div>` : ""}` : ""}
 					<div style="overflow-x:auto;margin-top:12px"><table class="asset-table"><thead><tr><th>종목</th><th>수량</th><th>평단가</th><th>현재가</th><th>총매입</th><th>평가금액</th><th>평가손익 / 수익률</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="8" style="text-align:center;color:#929a91;padding:28px 4px">${selectedTab.label} 보유 내역이 없습니다.</td></tr>`}</tbody></table></div>
@@ -784,6 +801,7 @@
 						if (!affected.length) return;
 						affected.forEach(item => { item.price = ticker.trade_price; });
 						state.pricesUpdated = new Date().toISOString();
+						updateHomeAssetSummary();
 						if (!priceRenderTimer) priceRenderTimer = setTimeout(() => {
 							priceRenderTimer = null; saveState(5000); updatePriceStatus();
 							const focused = document.activeElement;
@@ -812,7 +830,7 @@
 					const quotes = await response.json();
 					quotes.forEach(quote => holdings.filter(item => item.market === quote.market).forEach(item => { item.price = quote.trade_price; }));
 				}
-				state.pricesUpdated = new Date().toISOString(); saveState(5000); updatePriceStatus();
+				state.pricesUpdated = new Date().toISOString(); saveState(5000); updatePriceStatus(); updateHomeAssetSummary();
 				if (["home", "assets"].includes(activeView)) render();
 				connectPriceStream();
 			} catch (error) { priceStreamStatus = "연결 확인 필요"; updatePriceStatus(); }
@@ -844,10 +862,17 @@
 			stockRefreshInFlight = true;
 			try {
 				const symbols = [...new Set(stocks.map(item => item.symbol))];
-				const response = await fetch(`/api/quotes?symbols=${encodeURIComponent(symbols.join(","))}`, { cache:"no-store" });
-				const payload = await response.json();
-				if (!response.ok) throw new Error(payload.error || "주식 시세 조회에 실패했습니다.");
-				const quotes = new Map((payload.result || []).map(quote => [quote.symbol.toLocaleUpperCase("en-US"), quote]));
+				const quotes = new Map();
+				for (let index = 0; index < symbols.length; index += 200) {
+					const batch = symbols.slice(index, index + 200);
+					const response = await fetch(`/api/quotes?symbols=${encodeURIComponent(batch.join(","))}`, { cache:"no-store" });
+					const payload = await response.json();
+					if (!response.ok) throw new Error(payload.error || "주식 시세 조회에 실패했습니다.");
+					if (!Array.isArray(payload.result)) throw new Error("토스 시세 응답 형식이 올바르지 않습니다.");
+					payload.result.forEach(quote => {
+						if (quote?.symbol) quotes.set(String(quote.symbol).toLocaleUpperCase("en-US"), quote);
+					});
+				}
 				for (const stock of stocks) {
 					const quote = quotes.get(stock.symbol.toLocaleUpperCase("en-US"));
 					const lastPrice = Number(quote?.lastPrice);
@@ -858,24 +883,28 @@
 						stock.lastQuoteAt = quote.timestamp || stock.lastQuoteAt || null;
 					}
 				}
+				let exchangeRateError = "";
 				if (stocks.some(stock => stock.currency === "USD")) {
-					const fxResponse = await fetch("/api/exchange-rate", { cache:"no-store" });
-					const fxPayload = await fxResponse.json();
-					const rate = Number(fxPayload.result?.rate);
-					if (fxResponse.ok && Number.isFinite(rate) && rate > 0) {
+					try {
+						const fxResponse = await fetch("/api/exchange-rate", { cache:"no-store" });
+						const fxPayload = await fxResponse.json();
+						if (!fxResponse.ok) throw new Error(fxPayload.error || `환율 조회 실패 (HTTP ${fxResponse.status}).`);
+						const rate = Number(fxPayload.result?.rate);
+						if (!Number.isFinite(rate) || rate <= 0) throw new Error("유효한 환율 응답이 아닙니다.");
 						state.exchangeRate = rate;
 						state.exchangeRateUpdated = fxPayload.result.validFrom || new Date().toISOString();
-					}
+					} catch (error) { exchangeRateError = error.message; }
 				}
 				state.pricesUpdated = new Date().toISOString();
-				stockApiStatus = `토스 시세 확인 ${new Date(state.pricesUpdated).toLocaleTimeString("ko-KR", { hour:"2-digit", minute:"2-digit", second:"2-digit" })}`;
+				stockApiStatus = `토스 시세 확인 ${new Date(state.pricesUpdated).toLocaleTimeString("ko-KR", { hour:"2-digit", minute:"2-digit", second:"2-digit" })}${exchangeRateError ? ` · 환율 갱신 실패 (${exchangeRateError}), 기존 환율 유지` : ""}`;
 				saveState();
+				updateHomeAssetSummary();
 				if (["home", "assets"].includes(activeView)) {
 					const focused = document.activeElement;
-					if (!focused || !["INPUT", "SELECT", "BUTTON"].includes(focused.tagName)) render();
+					if (!focused || !["INPUT", "SELECT", "TEXTAREA"].includes(focused.tagName)) render();
 				}
 			} catch (error) {
-				stockApiStatus = error.message.includes("not configured") ? "토스 API 키 설정 필요 · 기존 가격 유지" : "시세 연결 실패 · 마지막 가격 유지";
+				stockApiStatus = error.message.includes("not configured") ? "토스 API 키 설정 필요 · 기존 가격 유지" : `시세 연결 실패 (${error.message}) · 마지막 가격 유지`;
 				const status = document.getElementById("price-status");
 				if (status && activeAssetTab !== "upbit") status.textContent = stockApiStatus;
 			} finally { stockRefreshInFlight = false; }
@@ -889,9 +918,107 @@
 			if (state.holdings.some(item => item.type === "stock")) await refreshStockPrices();
 			else if (activeView === "assets") render();
 		}
+		async function tossRequest(path) {
+			if (!cloudClient || !cloudReady) throw new Error("Supabase 가계부에 로그인한 뒤 이용해 주세요.");
+			const { data, error } = await cloudClient.auth.getSession();
+			if (error) throw error;
+			if (!data.session?.access_token) throw new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요.");
+			const response = await fetch(path, {
+				headers: { Authorization:`Bearer ${data.session.access_token}` },
+				cache:"no-store"
+			});
+			const payload = await response.json();
+			if (!response.ok) throw new Error(payload.error || `요청에 실패했습니다 (HTTP ${response.status}).`);
+			return payload;
+		}
+		async function loadTossAccounts() {
+			stockApiStatus = "토스 계좌 조회 중";
+			if (activeView === "assets") render();
+			try {
+				const payload = await tossRequest("/api/accounts");
+				if (!Array.isArray(payload.result)) throw new Error("토스 계좌 응답 형식이 올바르지 않습니다.");
+				state.tossAccounts = payload.result;
+				if (!state.tossAccounts.some(account => String(account.accountSeq) === String(state.tossAccountSeq))) {
+					state.tossAccountSeq = state.tossAccounts[0]?.accountSeq || null;
+				}
+				saveState(); stockApiStatus = `토스 계좌 ${state.tossAccounts.length}개 조회됨`; render();
+			} catch (error) {
+				stockApiStatus = `토스 계좌 조회 실패: ${error.message}`;
+				if (activeView === "assets") render();
+				showToast(stockApiStatus);
+			}
+		}
+		async function syncTossHoldings() {
+			const accountSeq = String(state.tossAccountSeq || "");
+			if (!/^\d{1,20}$/.test(accountSeq)) { showToast("먼저 토스증권 계좌를 조회하고 선택해 주세요."); return; }
+			if (!state.tossLastSyncAt && state.holdings.length) {
+				if (!confirm("첫 토스 계좌 연동 전에 현재 가계부 전체 JSON 백업을 다운로드합니다. 계속할까요?")) return;
+				exportBackup();
+			}
+			stockApiStatus = "토스 보유 종목 조회 중";
+			if (activeView === "assets") render();
+			try {
+				const payload = await tossRequest(`/api/holdings?accountSeq=${encodeURIComponent(accountSeq)}`);
+				const items = payload.result?.items;
+				if (!Array.isArray(items)) throw new Error("토스 보유 종목 응답 형식이 올바르지 않습니다.");
+				const updatedAt = new Date().toISOString();
+				const imported = items.map(item => {
+					const market = item.marketCountry;
+					const symbol = String(item.symbol || "").toUpperCase();
+					const quantity = Number(item.quantity);
+					const average = Number(item.averagePurchasePrice);
+					const current = Number(item.lastPrice);
+					if (!["KR", "US"].includes(market) || !/^[A-Z0-9][A-Z0-9.-]{0,19}$/.test(symbol)
+						|| !Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(average) || average < 0) {
+						throw new Error("토스 보유 종목 중 형식이 올바르지 않은 항목이 있어 기존 보유 정보를 변경하지 않았습니다.");
+					}
+					const currency = item.currency === "USD" || market === "US" ? "USD" : "KRW";
+					const id = `toss:${accountSeq}:${market}:${symbol}`;
+					const previous = state.holdings.find(holding => holding.id === id);
+					const lastPrice = Number.isFinite(current) && current > 0 ? current : previous?.lastPrice ?? null;
+					return {
+						id, type:"stock", source:"account", broker:"toss", accountSeq,
+						market, name:String(item.name || symbol), symbol, currency,
+						averageCurrency:currency, quantity, average,
+						lastPrice, price:lastPrice, lastQuoteAt:previous?.lastQuoteAt || null
+					};
+				});
+				const existing = state.holdings.filter(holding => !(holding.type === "stock" && holding.broker === "toss" && String(holding.accountSeq) === accountSeq));
+				state.holdings = [...existing, ...imported];
+				state.tossLastSyncAt = updatedAt;
+				state.pricesUpdated = state.pricesUpdated || null;
+				saveState(); render();
+				stockApiStatus = `토스 보유 종목 ${imported.length}개 연동됨`;
+				showToast(`${imported.length}개 토스 보유 종목을 가계부에 반영했어요.`);
+				await refreshStockPrices();
+			} catch (error) {
+				stockApiStatus = `토스 보유 조회 실패: ${error.message}`;
+				if (activeView === "assets") render();
+				showToast(stockApiStatus);
+			}
+		}
+		async function testTossConnection() {
+			stockApiStatus = "토스 인증·시세 테스트 중";
+			if (activeView === "assets") render();
+			try {
+				const result = await tossRequest("/api/diagnostics");
+				const successfulQuotes = result.quotes.filter(quote => quote.success).length;
+				const quoteSummary = result.quotes.map(quote => `${quote.symbol} ${quote.success ? formatCurrency(quote.lastPrice, quote.currency || (quote.symbol === "AAPL" ? "USD" : "KRW")) : "수신 실패"}`).join(" · ");
+				stockApiStatus = result.error || `OAuth ${result.oauth.success ? "성공" : "실패"} · ${quoteSummary} · 환율 ${result.exchangeRate.success ? `${won(result.exchangeRate.rate)}/USD` : "수신 실패"}`;
+				if (result.oauth.success && successfulQuotes === 2 && result.exchangeRate.success) showToast("토스 OAuth, 삼성전자·애플 시세와 환율 테스트에 성공했어요.");
+				else showToast(stockApiStatus);
+			} catch (error) {
+				stockApiStatus = `토스 연결 테스트 실패: ${error.message}`;
+				showToast(stockApiStatus);
+			}
+			if (activeView === "assets") render();
+		}
 		document.addEventListener("click", event => {
 			const nav = event.target.closest("[data-view]");
 			if (nav) { activeView = nav.dataset.view; render(); return; }
+			if (event.target.closest("[data-toss-accounts]")) { loadTossAccounts(); return; }
+			if (event.target.closest("[data-toss-sync]")) { syncTossHoldings(); return; }
+			if (event.target.closest("[data-toss-diagnostics]")) { testTossConnection(); return; }
 			const assetTab = event.target.closest("[data-asset-tab]");
 			if (assetTab) { activeAssetTab = assetTab.dataset.assetTab; stockSearchResults = []; selectedStock = null; render(); return; }
 			const stockOption = event.target.closest("[data-stock-symbol]");
@@ -994,8 +1121,7 @@
 				const quantity = Number(data.get("quantity"));
 				const average = Number(data.get("average"));
 				if (!selectedStock || quantity <= 0 || average <= 0 || ![quantity, average].every(Number.isFinite)) { showToast("종목, 수량과 평단가를 확인해 주세요."); return; }
-				const broker = activeAssetTab === "toss" || activeAssetTab === "toss-us" ? "toss" : "other";
-				state.holdings.push({ id:crypto.randomUUID(), type:"stock", source:"manual", market:selectedStock.market, broker, name, symbol:selectedStock.symbol, currency:selectedStock.currency, averageCurrency:selectedStock.currency, quantity, average, lastPrice:null, price:null, lastQuoteAt:null });
+				state.holdings.push({ id:crypto.randomUUID(), type:"stock", source:"manual", market:selectedStock.market, broker:"kiwoom", name, symbol:selectedStock.symbol, currency:selectedStock.currency, averageCurrency:selectedStock.currency, quantity, average, lastPrice:null, price:null, lastQuoteAt:null });
 				saveState(); selectedStock = null; render(); showToast(`${name} 종목을 저장했어요.`); refreshStockPrices();
 			}
 			if (event.target.id === "stock-manual-form") {
@@ -1009,11 +1135,18 @@
 				if (activeAssetTab === "toss" || activeAssetTab === "toss-us") { showToast("토스 계좌 조회 연동은 아직 설정되지 않았습니다."); return; }
 				const market = activeAssetTab === "us" || activeAssetTab === "toss-us" ? "US" : "KR";
 				const currency = market === "US" ? "USD" : "KRW";
-				state.holdings.push({ id:crypto.randomUUID(), type:"stock", source:"manual", broker:"other", market, name, symbol, currency, averageCurrency:currency, quantity, average, lastPrice:null, price:null, lastQuoteAt:null });
+				state.holdings.push({ id:crypto.randomUUID(), type:"stock", source:"manual", broker:"kiwoom", market, name, symbol, currency, averageCurrency:currency, quantity, average, lastPrice:null, price:null, lastQuoteAt:null });
 				saveState(); render(); showToast(`${name} 종목을 직접 등록했어요.`); refreshStockPrices();
 			}
 		});
 		document.addEventListener("change", event => {
+			if (event.target.id === "toss-account-select") {
+				state.tossAccountSeq = event.target.value || null;
+				saveState();
+				const syncButton = document.querySelector("[data-toss-sync]");
+				if (syncButton) syncButton.disabled = !state.tossAccountSeq;
+				return;
+			}
 			if (event.target.id !== "import-backup-file") return;
 			const [file] = event.target.files || [];
 			if (file) importBackup(file).catch(error => { console.error("가계부 백업 복원 실패:", error); showToast(`백업을 복원하지 못했습니다. ${error.message}`); });
