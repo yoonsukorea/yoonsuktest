@@ -7,6 +7,10 @@ services:
     startCommand: node server.mjs
     healthCheckPath: /healthz
     envVars:
+      - key: TOSS_CLIENT_ID
+        sync: false
+      - key: TOSS_CLIENT_SECRET
+        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY
