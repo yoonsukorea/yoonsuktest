@@ -95,30 +95,44 @@ function parseStockCsv(csv) {
 	}
 
 	const prices = new Map();
+	const symbols = new Set();
+	const unavailable = [];
 	for (const [index, fields] of rows.entries()) {
 		const rawPrice = (fields[0] || "").replace(/^\uFEFF/, "").trim();
 		const symbol = (fields[1] || "").trim().toUpperCase();
 		if (!rawPrice && !symbol) continue;
 		if (index === 0 && /^(current price|price|현재 주가)$/i.test(rawPrice)
 			&& /^(symbol|stock code|종목코드)$/i.test(symbol)) continue;
-		const price = Number(rawPrice);
-		if (!symbol || !/^[A-Z0-9][A-Z0-9.-]{0,19}$/.test(symbol)
-			|| !Number.isFinite(price) || price <= 0) {
+		if (!symbol || !/^[A-Z0-9][A-Z0-9.-]{0,19}$/.test(symbol)) {
 			throw new Error(`Google Sheets returned an invalid stock price on row ${index + 1}.`);
 		}
-		if (prices.has(symbol)) throw new Error(`Google Sheets returned a duplicate stock code: ${symbol}.`);
+		if (symbols.has(symbol)) throw new Error(`Google Sheets returned a duplicate stock code: ${symbol}.`);
+		symbols.add(symbol);
+		const price = Number(rawPrice);
+		if (!Number.isFinite(price) || price <= 0) {
+			if (symbol === "USDKRW") throw new Error("Google Sheets returned an invalid USDKRW exchange rate.");
+			unavailable.push({
+				symbol,
+				reason: /^#(N\/A|VALUE!|REF!|ERROR!|NAME\?)/i.test(rawPrice)
+					? rawPrice
+					: "price-unavailable"
+			});
+			continue;
+		}
 		prices.set(symbol, price);
 	}
 	const exchangeRate = prices.get("USDKRW");
-	if (!prices.size || !exchangeRate) throw new Error("Google Sheets is missing valid stock prices or the USDKRW exchange rate.");
+	if (!exchangeRate) throw new Error("Google Sheets is missing a valid USDKRW exchange rate.");
 	prices.delete("USDKRW");
 	return {
 		prices: [...prices].map(([symbol, price]) => ({ symbol, price })),
+		unavailable,
 		exchangeRate
 	};
 }
 
-async function getStockCsvPrices() {
+async function getStockCsvPrices(forceRefresh = false) {
+	if (forceRefresh) stockCsvCache = null;
 	if (stockCsvCache && Date.now() - stockCsvCache.at < stockCsvCacheMs) return stockCsvCache.value;
 	if (stockCsvRequest) return stockCsvRequest;
 	stockCsvRequest = (async () => {
@@ -388,7 +402,7 @@ const server = createServer(async (request, response) => {
 
 	if (url.pathname === "/api/stock-prices") {
 		try {
-			return sendJson(response, 200, await getStockCsvPrices());
+			return sendJson(response, 200, await getStockCsvPrices(url.searchParams.get("force") === "1"));
 		} catch (error) {
 			console.error("Google Sheets stock price lookup failed:", error);
 			return sendJson(response, 502, { error: "구글 시트 주식 시세를 불러오지 못했습니다. 기존 유효 시세는 유지됩니다." });

@@ -40,6 +40,33 @@ Apple (`AAPL`), and the exchange rate. Authenticated account lookup uses
 `X-Tossinvest-Account` value. Account and holdings requests require the
 Supabase session and the matching `TOSS_ALLOWED_USER_ID`.
 
+## Google Sheets stock valuation
+
+The asset view reads the published, read-only Google Sheets CSV through
+`GET /api/stock-prices`. The server caches successful responses for 24 hours;
+`GET /api/stock-prices?force=1` bypasses that cache. The asset view's **지금
+평가하기** action uses the forced refresh, updates each holding independently,
+and saves prices, exchange rate, evaluation time, and missing-symbol diagnostics
+through the signed-in user's existing revisioned Supabase household document.
+No holdings, average purchase prices, quantities, or household totals are sent
+to Google Sheets.
+
+The browser attempts the daily 10:00 Asia/Seoul evaluation while the app is
+open. When the browser is closed or a run is missed, signing in after 10:00
+checks the saved evaluation date and retries. This is a browser/login fallback,
+not an unattended GitHub Actions evaluation: an unattended runner cannot read
+the private household row under the current user-scoped Supabase RLS without a
+separate narrowly scoped server-side authorization mechanism. Do not put a
+Supabase service-role key in the workflow. The published CSV contains no source
+quote timestamp, so the app distinguishes CSV retrieval time from evaluation
+execution time and does not claim either is the market's actual trade time.
+
+Google Finance formulas are suggestions only. For a U.S. security, use its
+actual exchange prefix, for example `=GOOGLEFINANCE("NASDAQ:TSLA","price")`.
+For a Korean code, `=GOOGLEFINANCE("KRX:035420","price")` may be attempted, but
+Google documents that most international exchanges are unsupported. A
+`#N/A`/other formula error is shown as unavailable; no synthetic price is used.
+
 ## Supabase login and cloud sync
 
 The app supports email/password Supabase Auth and syncs each signed-in user's

@@ -136,7 +136,7 @@
 			["coupang", "쿠팡", "쿠팡", 7900], ["health-insurance", "건강보험료", "보험", 318130],
 			["pension-insurance", "연금보험료", "보험", 366660]
 		];
-		const defaultState = { cash: 0, accounts: [], holdings: [], transactions: [], pricesUpdated: null, stockPricesUpdated: null, fixedExpenseCycles: [], exchangeRate: null, exchangeRateUpdated: null, tossAccounts: [], tossAccountSeq: null, tossLastSyncAt: null };
+		const defaultState = { cash: 0, accounts: [], holdings: [], transactions: [], pricesUpdated: null, stockPricesUpdated: null, stockEvaluation: null, fixedExpenseCycles: [], exchangeRate: null, exchangeRateUpdated: null, tossAccounts: [], tossAccountSeq: null, tossLastSyncAt: null };
 		let state = loadState();
 		let activeView = "home";
 		let entryKind = "expense";
@@ -154,8 +154,10 @@
 		let selectedStock = null;
 		let editingHoldingId = null;
 		let stockRefreshInFlight = false;
+		let stockLastAutoAttemptAt = 0;
 		let stockApiStatus = "구글 시트 CSV · 보유 종목 추가 시 조회";
 		let stockUnavailableSymbols = new Set();
+		let stockCsvUnavailable = new Map();
 		let cloudClient = null;
 		let cloudUser = null;
 		let cloudRevision = 0;
@@ -510,7 +512,7 @@
 			if (state.holdings.length) refreshPrices();
 			setInterval(() => { if (state.holdings.length && !document.hidden) refreshPrices(); }, 30000);
 			refreshStockPricesIfDue();
-			setInterval(() => { if (!document.hidden) refreshStockPricesIfDue(); }, 60 * 60 * 1000);
+			setInterval(() => { if (!document.hidden) refreshStockPricesIfDue(); }, 60 * 1000);
 			document.addEventListener("visibilitychange", () => {
 				if (!document.hidden) refreshStockPricesIfDue();
 			});
@@ -599,6 +601,51 @@
 			const cost = priced.reduce((sum, item) => sum + item.costKrw, 0);
 			const value = priced.reduce((sum, item) => sum + item.valueKrw, 0);
 			return { cost, value, profit:value - cost, returnRate:cost ? (value - cost) / cost * 100 : null, pricedCount:priced.length, waitingCount:stocks.length - priced.length };
+		}
+		function seoulDateKey(date = new Date()) {
+			return new Intl.DateTimeFormat("en-CA", { timeZone:"Asia/Seoul", year:"numeric", month:"2-digit", day:"2-digit" }).format(date);
+		}
+		function seoulMinutes(date = new Date()) {
+			const parts = new Intl.DateTimeFormat("en-GB", { timeZone:"Asia/Seoul", hour:"2-digit", minute:"2-digit", hourCycle:"h23" }).formatToParts(date);
+			return Number(parts.find(part => part.type === "hour")?.value) * 60 + Number(parts.find(part => part.type === "minute")?.value);
+		}
+		function nextSeoulEvaluationText() {
+			const now = new Date();
+			const seoulNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
+			let next = Date.UTC(seoulNow.getUTCFullYear(), seoulNow.getUTCMonth(), seoulNow.getUTCDate(), 10) - 9 * 60 * 60 * 1000;
+			if (next <= now.getTime()) next += 24 * 60 * 60 * 1000;
+			return new Intl.DateTimeFormat("ko-KR", { timeZone:"Asia/Seoul", month:"long", day:"numeric", hour:"2-digit", minute:"2-digit" }).format(new Date(next));
+		}
+		function stockEvaluationStatus() {
+			const evaluation = state.stockEvaluation;
+			const attemptedToday = evaluation?.lastAttemptAt && seoulDateKey(new Date(evaluation.lastAttemptAt)) === seoulDateKey();
+			if (evaluation?.lastAttemptError && attemptedToday) return `오늘 자동 평가 실패: ${evaluation.lastAttemptError} 지금 평가하기를 눌러 다시 시도할 수 있습니다.`;
+			if (!evaluation?.evaluatedAt) return `평가 기록 없음 · 브라우저 자동 평가 ${nextSeoulEvaluationText()} (한국시간). 브라우저가 닫혀 있으면 실행되지 않으며 다음 로그인 시 누락분을 다시 평가합니다.`;
+			const evaluatedDate = seoulDateKey(new Date(evaluation.evaluatedAt));
+			if (evaluatedDate !== seoulDateKey()) return `오늘 평가가 아직 없습니다 · 브라우저 자동 평가 ${nextSeoulEvaluationText()} (한국시간). 브라우저가 닫혀 있으면 실행되지 않으며 오전 10시 이후 로그인 시 누락분을 다시 평가합니다.`;
+			return `오늘 평가 완료 · 현재가 수신 ${evaluation.pricedCount}개 / ${evaluation.positionCount}개 · 다음 브라우저 자동 평가 ${nextSeoulEvaluationText()} (한국시간, 브라우저가 열려 있어야 실행)`;
+		}
+		function renderStockQuoteDiagnostics(stocks) {
+			const evaluation = state.stockEvaluation;
+			if (!evaluation) return `<div class="connection-note">시세표에 없는 종목은 임의 가격으로 계산하지 않습니다. 한국 GOOGLEFINANCE는 거래소 지원 여부에 따라 값을 반환하지 않을 수 있습니다.</div>`;
+			const missing = evaluation.missingSymbols || [];
+			const unavailable = evaluation.unavailableSymbols || [];
+			const diagnostics = [
+				...missing.map(symbol => ({ symbol, reason:"구글 시트 CSV에 종목코드가 없음", market:stocks.find(item => String(item.symbol).toUpperCase() === symbol)?.market })),
+				...unavailable.map(item => ({ symbol:item.symbol, reason:`구글 시트 가격 오류 ${item.reason}`, market:stocks.find(stock => String(stock.symbol).toUpperCase() === item.symbol)?.market }))
+			];
+			const unique = [...new Map(diagnostics.map(item => [item.symbol, item])).values()];
+			const issueList = unique.length ? `<div class="connection-note"><strong>시세 확인이 필요한 종목 (${unique.length})</strong><ul>${unique.map(item => {
+				const ticker = safe(item.symbol);
+				const formula = item.market === "KR"
+					? `=GOOGLEFINANCE("KRX:${ticker}","price")`
+					: `=GOOGLEFINANCE("<거래소>:${ticker}","price")`;
+				const guidance = item.market === "US" ? "실제 상장 거래소 접두어로 <거래소>를 바꿔 입력하세요." : "수식은 참고용입니다. Google 문서상 GOOGLEFINANCE는 대부분의 해외 거래소를 지원하지 않아 KRX 결과가 없을 수 있습니다.";
+				return `<li><strong>${ticker}</strong> · ${safe(item.reason)}<br><code>${safe(formula)}</code><br>${safe(guidance)}</li>`;
+			}).join("")}</ul></div>` : `<div class="connection-note">이번 평가에서 CSV 가격을 받지 못한 종목은 없습니다.</div>`;
+			const quoteAt = evaluation.priceListRetrievedAt ? new Date(evaluation.priceListRetrievedAt).toLocaleString("ko-KR") : "기록 없음";
+			const evaluatedAt = evaluation.evaluatedAt ? new Date(evaluation.evaluatedAt).toLocaleString("ko-KR") : "평가 실패";
+			return `<div class="connection-note">${safe(stockEvaluationStatus())}<br>시세 기준: 공개 CSV 수신 ${safe(quoteAt)} (원본 시세 시각은 CSV에 제공되지 않음)<br>평가 실행: ${safe(evaluatedAt)}</div>${issueList}`;
 		}
 		function classify(title, kind = "expense") {
 			if (kind === "income") return incomeRules.find(([, pattern]) => pattern.test(title))?.[0] || "기타 소득";
@@ -691,9 +738,13 @@
 				if (editingHoldingId === item.id) return `<tr><td colspan="8"><form class="asset-form holding-edit-form" data-holding-row="${safe(item.id)}"><input class="field" data-holding-name value="${safe(item.name)}" aria-label="종목명" required maxlength="80"><input class="field" data-holding-symbol value="${safe(item.symbol)}" aria-label="종목 코드" required maxlength="20"><input class="field" data-holding-quantity type="number" min="0.000001" step="any" value="${Number(item.quantity)}" aria-label="보유 수량" required><input class="field" data-holding-average type="number" min="0.000001" step="any" value="${Number(item.average)}" aria-label="평균 매수가" required><button class="primary" type="button" data-holding-save="${safe(item.id)}">저장</button><button class="text-button" type="button" data-holding-cancel>취소</button></form></td></tr>`;
 				const metrics = stockMetrics(item);
 				const profitClass = metrics.profitKrw === null ? "" : metrics.profitKrw >= 0 ? "stock-gain" : "stock-loss";
-				const quoteTime = item.lastQuoteAt ? new Date(item.lastQuoteAt).toLocaleString("ko-KR", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" }) : "조회 전";
-				const missingQuote = stockUnavailableSymbols.has(String(item.symbol).toUpperCase());
-				const quoteStatus = missingQuote ? `<div class="status-line negative">시세 목록에 없는 종목입니다. 구글 시트에 종목코드를 추가해주세요.</div>` : "";
+				const quoteTime = item.lastQuoteAt ? `CSV 수신 ${new Date(item.lastQuoteAt).toLocaleString("ko-KR", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" })}` : "조회 전";
+				const symbolKey = String(item.symbol).toUpperCase();
+				const missingQuote = stockUnavailableSymbols.has(symbolKey) || (state.stockEvaluation?.missingSymbols || []).includes(symbolKey);
+				const quoteError = stockCsvUnavailable.get(symbolKey) || (state.stockEvaluation?.unavailableSymbols || []).find(issue => issue.symbol === symbolKey)?.reason;
+				const quoteStatus = missingQuote
+					? `<div class="status-line negative">시세 목록에 없는 종목입니다. 구글 시트에 종목코드를 추가해주세요.</div>`
+					: quoteError ? `<div class="status-line negative">구글 시트 수식 오류: ${safe(quoteError)}</div>` : "";
 				const currentDisplay = metrics.current ? formatCurrency(metrics.current, metrics.currency) : "시세 대기";
 				const currentKrw = metrics.currency === "USD" && metrics.valueKrw !== null ? `<div class="status-line">${won(metrics.valueKrw)} 환산</div>` : "";
 				const profitDisplay = metrics.profitKrw === null ? "시세 대기" : `${metrics.profitKrw >= 0 ? "+" : "−"}${won(Math.abs(metrics.profitKrw))}`;
@@ -723,7 +774,8 @@
 			const portfolioCost = formatCurrency(stockPortfolio.cost, "KRW");
 			const portfolioProfitClass = stockPortfolio.profit >= 0 ? "stock-gain" : "stock-loss";
 			const portfolioReturn = stockPortfolio.returnRate === null ? "—" : `${stockPortfolio.returnRate >= 0 ? "+" : ""}${stockPortfolio.returnRate.toFixed(2)}%`;
-			return `${renderHead("ASSET TRACKER", "자산 관리", `<div class="asset-actions"><button class="text-button" id="export-backup" type="button">백업 내보내기</button><button class="text-button" id="import-backup-button" type="button">백업 복원</button><input id="import-backup-file" type="file" accept="application/json,.json" hidden><button class="primary" id="refresh-prices" style="height:36px">시세 새로고침</button></div>`)}
+			const allStocks = state.holdings.filter(item => item.type === "stock");
+			return `${renderHead("ASSET TRACKER", "자산 관리", `<div class="asset-actions"><button class="text-button" id="export-backup" type="button">백업 내보내기</button><button class="text-button" id="import-backup-button" type="button">백업 복원</button><input id="import-backup-file" type="file" accept="application/json,.json" hidden><button class="primary" id="refresh-prices" style="height:36px">지금 평가하기</button></div>`)}
 				<section class="panel section-wrap"><div class="panel-title"><h2>현금·예금·저축</h2><span class="status-line">합계 ${won(accountTotal())}</span></div>
 					<form id="account-form" class="asset-form account-form"><select class="field" name="category" aria-label="자산 종류"><option>현금</option><option>입출금</option><option>예금</option><option>적금</option><option>청약</option></select><input class="field" name="label" placeholder="별칭 (예: 비상금, 주거래 통장)" maxlength="40"><input class="field" name="amount" type="number" min="0" step="1" placeholder="현재 잔액" required><button class="primary" type="submit">자산 추가</button></form>
 					<div class="account-list">${accounts || `<div class="empty">현금, 예금, 적금 계좌를 종류별로 추가해 보세요.</div>`}</div>
@@ -732,7 +784,7 @@
 				<section class="panel section-wrap" style="margin-top:12px"><div class="panel-title"><h2>${selectedTab.label}</h2><span class="status-line" id="price-status">${isUpbit ? `${safe(priceStreamStatus)} · ${updated}` : safe(stockApiStatus)}</span></div>
 					${isUpbit ? coinForm : isTossTab ? tossAccountPanel : `${stockEntryForm}${stockManualForm}`}
 					<div class="connection-note">${connectionNote}</div>
-					${!isUpbit ? `<div class="stock-totals"><div><span>총 매입금액</span><strong>${portfolioCost}</strong></div><div><span>총 평가금액</span><strong>${portfolioValue}</strong></div><div><span>총 평가손익</span><strong class="${portfolioProfitClass}">${stockPortfolio.pricedCount ? `${stockPortfolio.profit >= 0 ? "+" : "−"}${won(Math.abs(stockPortfolio.profit))}` : "시세 대기"}</strong></div><div><span>총 수익률</span><strong class="${portfolioProfitClass}">${portfolioReturn}</strong></div></div>${stockPortfolio.waitingCount ? `<div class="status-line">시세 미조회 ${stockPortfolio.waitingCount}종목 · 기존 보유 내역은 유지됩니다.</div>` : ""}` : ""}
+					${!isUpbit ? `<div class="stock-totals"><div><span>총 매입금액</span><strong>${portfolioCost}</strong></div><div><span>총 평가금액</span><strong>${portfolioValue}</strong></div><div><span>총 평가손익</span><strong class="${portfolioProfitClass}">${stockPortfolio.pricedCount ? `${stockPortfolio.profit >= 0 ? "+" : "−"}${won(Math.abs(stockPortfolio.profit))}` : "시세 대기"}</strong></div><div><span>총 수익률</span><strong class="${portfolioProfitClass}">${portfolioReturn}</strong></div></div>${stockPortfolio.waitingCount ? `<div class="status-line">시세 미조회 ${stockPortfolio.waitingCount}종목 · 기존 유효 시세와 총자산은 유지됩니다.</div>` : ""}${renderStockQuoteDiagnostics(allStocks)}` : ""}
 					<div style="overflow-x:auto;margin-top:12px"><table class="asset-table"><thead><tr><th>종목</th><th>수량</th><th>평단가</th><th>현재가</th><th>총매입</th><th>평가금액</th><th>평가손익 / 수익률</th><th></th></tr></thead><tbody>${rows || `<tr><td colspan="8" style="text-align:center;color:#929a91;padding:28px 4px">${selectedTab.label} 보유 내역이 없습니다.</td></tr>`}</tbody></table></div>
 				</section>`;
 		}
@@ -861,15 +913,21 @@
 			stockApiStatus = stockSearchResults.length ? "공식 종목 목록" : "검색 결과 없음";
 			if (activeView === "assets") render();
 		}
-		async function refreshStockPrices() {
+		async function refreshStockPrices({ force = true, trigger = "manual" } = {}) {
 			const stocks = state.holdings.filter(item => item.type === "stock");
-			if (!stocks.length || stockRefreshInFlight) return;
+			if (!stocks.length) {
+				stockApiStatus = "평가할 주식 보유정보가 없습니다.";
+				if (activeView === "assets") render();
+				return false;
+			}
+			if (stockRefreshInFlight) return false;
 			stockRefreshInFlight = true;
+			let evaluationCompleted = false;
 			try {
-				const response = await fetch("/api/stock-prices", { cache:"no-store" });
+				const response = await fetch(`/api/stock-prices${force ? "?force=1" : ""}`, { cache:"no-store" });
 				const payload = await response.json();
 				if (!response.ok) throw new Error(payload.error || "구글 시트 시세 조회에 실패했습니다.");
-				if (!Array.isArray(payload.prices)) throw new Error("구글 시트 시세 응답 형식이 올바르지 않습니다.");
+				if (!Array.isArray(payload.prices) || !Array.isArray(payload.unavailable)) throw new Error("구글 시트 시세 응답 형식이 올바르지 않습니다.");
 				const retrievedAt = new Date(payload.retrievedAt);
 				const exchangeRate = Number(payload.exchangeRate);
 				if (!Number.isFinite(retrievedAt.getTime()) || !Number.isFinite(exchangeRate) || exchangeRate <= 0) {
@@ -879,7 +937,11 @@
 					String(quote.symbol || "").toUpperCase(),
 					Number(quote.price)
 				]));
+				stockCsvUnavailable = new Map(payload.unavailable.map(item => [String(item.symbol || "").toUpperCase(), String(item.reason || "price-unavailable")]));
+				const listedSymbols = new Set([...quotes.keys(), ...stockCsvUnavailable.keys()]);
 				stockUnavailableSymbols = new Set();
+				let pricedCount = 0;
+				let staleCount = 0;
 				for (const stock of stocks) {
 					const symbol = String(stock.symbol || "").toUpperCase();
 					const lastPrice = quotes.get(symbol);
@@ -887,30 +949,80 @@
 						stock.lastPrice = lastPrice;
 						stock.price = lastPrice;
 						stock.lastQuoteAt = retrievedAt.toISOString();
+						pricedCount++;
 					} else {
-						stockUnavailableSymbols.add(symbol);
+						if (!listedSymbols.has(symbol)) stockUnavailableSymbols.add(symbol);
+						if (Number(stock.lastPrice ?? stock.price) > 0) staleCount++;
 					}
 				}
 				state.exchangeRate = exchangeRate;
 				state.exchangeRateUpdated = retrievedAt.toISOString();
 				state.stockPricesUpdated = retrievedAt.toISOString();
-				stockApiStatus = `구글 시트 CSV 확인 ${retrievedAt.toLocaleString("ko-KR", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" })}${stockUnavailableSymbols.size ? ` · 시세 목록에 없는 종목 ${stockUnavailableSymbols.size}개` : ""}`;
+				const evaluatedAt = new Date().toISOString();
+				const portfolio = stockPortfolioMetrics();
+				const unavailableSymbols = [...stockCsvUnavailable].map(([symbol, reason]) => ({ symbol, reason }));
+				state.stockEvaluation = {
+					lastAttemptAt:evaluatedAt,
+					lastAttemptError:null,
+					evaluatedAt,
+					priceListRetrievedAt:retrievedAt.toISOString(),
+					sourceQuoteTimestamp:null,
+					trigger,
+					positionCount:stocks.length,
+					pricedCount,
+					staleCount,
+					unpricedCount:stocks.length - pricedCount - staleCount,
+					missingSymbols:[...stockUnavailableSymbols],
+					unavailableSymbols,
+					exchangeRate,
+					stockValueKrw:portfolio.value,
+					stockProfitKrw:portfolio.profit,
+					stockReturnRate:portfolio.returnRate,
+					totalAssetsKrw:totalAssets()
+				};
+				evaluationCompleted = true;
+				stockApiStatus = `CSV 수신 ${retrievedAt.toLocaleString("ko-KR", { month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit" })} · 평가 ${new Date(evaluatedAt).toLocaleTimeString("ko-KR", { hour:"2-digit", minute:"2-digit" })} · 현재가 수신 ${pricedCount}/${stocks.length} · 오래된 시세 유지 ${staleCount}`;
 				saveState();
 				updateHomeAssetSummary();
+				if (cloudReady && cloudUser) {
+					await cloudWriteQueue;
+					if (cloudNeedsRetry) throw new Error("평가는 계산했지만 Supabase 저장을 확인하지 못했습니다. 동기화 상태를 확인한 뒤 다시 시도해 주세요.");
+				}
 				if (["home", "assets"].includes(activeView)) {
 					const focused = document.activeElement;
 					if (!focused || !["INPUT", "SELECT", "TEXTAREA"].includes(focused.tagName)) render();
 				}
+				return true;
 			} catch (error) {
-				stockApiStatus = `구글 시트 시세 조회 실패 (${error.message}) · 마지막 유효 시세 유지`;
 				console.error("구글 시트 주식 시세 갱신 실패:", error);
+				if (evaluationCompleted) {
+					stockApiStatus = `평가는 계산했지만 저장 확인 실패 (${error.message}) · Supabase 동기화를 확인해 주세요.`;
+				} else {
+					stockApiStatus = `구글 시트 시세 조회 실패 (${error.message}) · 마지막 유효 시세 유지`;
+					const attemptedAt = new Date().toISOString();
+					state.stockEvaluation = {
+						...(state.stockEvaluation || {}),
+						lastAttemptAt:attemptedAt,
+						lastAttemptError:error.message
+					};
+					saveState();
+				}
 				const status = document.getElementById("price-status");
 				if (status && activeAssetTab !== "upbit") status.textContent = stockApiStatus;
+				if (activeView === "assets") render();
+				return false;
 			} finally { stockRefreshInFlight = false; }
 		}
 		function refreshStockPricesIfDue() {
-			const lastRefresh = Date.parse(state.stockPricesUpdated || "");
-			if (!Number.isFinite(lastRefresh) || Date.now() - lastRefresh >= 24 * 60 * 60 * 1000) refreshStockPrices();
+			if (!state.holdings.some(item => item.type === "stock") || seoulMinutes() < 10 * 60) return;
+			const today = seoulDateKey();
+			const evaluatedAt = state.stockEvaluation?.evaluatedAt;
+			const attemptedAt = state.stockEvaluation?.lastAttemptAt;
+			if (evaluatedAt && seoulDateKey(new Date(evaluatedAt)) === today) return;
+			if (attemptedAt && seoulDateKey(new Date(attemptedAt)) === today && !state.stockEvaluation?.lastAttemptError) return;
+			if (stockLastAutoAttemptAt && Date.now() - stockLastAutoAttemptAt < 15 * 60 * 1000) return;
+			stockLastAutoAttemptAt = Date.now();
+			refreshStockPrices({ force:true, trigger:"scheduled-catch-up" });
 		}
 		async function tossRequest(path) {
 			if (!cloudClient || !cloudReady) throw new Error("Supabase 가계부에 로그인한 뒤 이용해 주세요.");
@@ -1065,7 +1177,12 @@
 			}
 			if (event.target.closest("#export-backup")) { exportBackup(); return; }
 			if (event.target.closest("#import-backup-button")) { document.getElementById("import-backup-file").click(); return; }
-			if (event.target.closest("#refresh-prices")) { refreshPrices(); refreshStockPrices(); }
+			if (event.target.closest("#refresh-prices")) {
+				refreshPrices();
+				refreshStockPrices({ force:true, trigger:"manual" }).then(success => {
+					showToast(success ? "최신 CSV 시세로 주식 평가를 완료하고 저장했어요." : stockApiStatus);
+				});
+			}
 		});
 		document.addEventListener("submit", event => {
 			if (event.target.id === "transaction-form") { event.preventDefault(); addTransaction(event.target); }
