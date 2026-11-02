@@ -6,6 +6,8 @@ import path from "node:path";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT) || 8000;
 const tossBaseUrl = "https://openapi.tossinvest.com";
+const stockCsvUrl = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSRbceKeNhzeqoxtMfSEk6YjuO7gFi_Zd_2jv7UyFfa6e-0bKsRy-gourgb-p8NObeSKS378yVA9Ewe/pub?gid=0&single=true&output=csv";
+const stockCsvCacheMs = 24 * 60 * 60 * 1000;
 const staticAssets = new Map([
 	["/manifest.webmanifest", "application/manifest+json; charset=utf-8"],
 	["/app-icon.svg", "image/svg+xml"],
@@ -24,6 +26,8 @@ let accountRequest = null;
 let lastStockCatalogRequestAt = 0;
 let diagnosticCache = null;
 let diagnosticRequest = null;
+let stockCsvCache = null;
+let stockCsvRequest = null;
 
 class TossApiError extends Error {
 	constructor(status, code, detail) {
@@ -51,6 +55,82 @@ function getSupabasePublicConfig() {
 	const anonKey = process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY || "";
 	const validUrl = /^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(url);
 	return { configured: validUrl && Boolean(anonKey), url: validUrl ? url : "", anonKey: validUrl ? anonKey : "" };
+}
+
+function parseStockCsv(csv) {
+	const rows = [];
+	let row = [];
+	let field = "";
+	let quoted = false;
+	for (let index = 0; index < csv.length; index++) {
+		const character = csv[index];
+		if (quoted) {
+			if (character === '"' && csv[index + 1] === '"') {
+				field += '"';
+				index++;
+			} else if (character === '"') {
+				quoted = false;
+			} else {
+				field += character;
+			}
+		} else if (character === '"' && field === "") {
+			quoted = true;
+		} else if (character === ",") {
+			row.push(field);
+			field = "";
+		} else if (character === "\n" || character === "\r") {
+			if (character === "\r" && csv[index + 1] === "\n") index++;
+			row.push(field);
+			rows.push(row);
+			row = [];
+			field = "";
+		} else {
+			field += character;
+		}
+	}
+	if (quoted) throw new Error("Google Sheets returned malformed CSV.");
+	if (field || row.length) {
+		row.push(field);
+		rows.push(row);
+	}
+
+	const prices = new Map();
+	for (const [index, fields] of rows.entries()) {
+		const rawPrice = (fields[0] || "").replace(/^\uFEFF/, "").trim();
+		const symbol = (fields[1] || "").trim().toUpperCase();
+		if (!rawPrice && !symbol) continue;
+		if (index === 0 && /^(current price|price|현재 주가)$/i.test(rawPrice)
+			&& /^(symbol|stock code|종목코드)$/i.test(symbol)) continue;
+		const price = Number(rawPrice);
+		if (!symbol || !/^[A-Z0-9][A-Z0-9.-]{0,19}$/.test(symbol)
+			|| !Number.isFinite(price) || price <= 0) {
+			throw new Error(`Google Sheets returned an invalid stock price on row ${index + 1}.`);
+		}
+		if (prices.has(symbol)) throw new Error(`Google Sheets returned a duplicate stock code: ${symbol}.`);
+		prices.set(symbol, price);
+	}
+	const exchangeRate = prices.get("USDKRW");
+	if (!prices.size || !exchangeRate) throw new Error("Google Sheets is missing valid stock prices or the USDKRW exchange rate.");
+	prices.delete("USDKRW");
+	return {
+		prices: [...prices].map(([symbol, price]) => ({ symbol, price })),
+		exchangeRate
+	};
+}
+
+async function getStockCsvPrices() {
+	if (stockCsvCache && Date.now() - stockCsvCache.at < stockCsvCacheMs) return stockCsvCache.value;
+	if (stockCsvRequest) return stockCsvRequest;
+	stockCsvRequest = (async () => {
+		const response = await fetch(stockCsvUrl, { signal: AbortSignal.timeout(15_000) });
+		if (!response.ok) throw new Error(`Google Sheets CSV request failed (HTTP ${response.status}).`);
+		const parsed = parseStockCsv(await response.text());
+		const value = { ...parsed, retrievedAt: new Date().toISOString() };
+		stockCsvCache = { at: Date.now(), value };
+		return value;
+	})();
+	try { return await stockCsvRequest; }
+	finally { stockCsvRequest = null; }
 }
 
 async function getAccessToken(forceRefresh = false) {
@@ -304,6 +384,15 @@ const server = createServer(async (request, response) => {
 			url: config.url,
 			anonKey: config.anonKey
 		});
+	}
+
+	if (url.pathname === "/api/stock-prices") {
+		try {
+			return sendJson(response, 200, await getStockCsvPrices());
+		} catch (error) {
+			console.error("Google Sheets stock price lookup failed:", error);
+			return sendJson(response, 502, { error: "구글 시트 주식 시세를 불러오지 못했습니다. 기존 유효 시세는 유지됩니다." });
+		}
 	}
 
 	if (request.method === "GET" && url.pathname === "/healthz") {
