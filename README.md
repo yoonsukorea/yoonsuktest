@@ -104,6 +104,26 @@ supporting browsers. Installation requires HTTPS (or localhost); the service
 worker caches the app shell only and does not cache API responses or synchronize
 private data.
 
+## Billing cycles and recurring expenses
+
+The household month is labeled by its ending month and runs from the 27th of
+the preceding month through the 26th of that month, using `Asia/Seoul` dates.
+For example, the November 2026 ledger covers October 27 through November 26.
+Existing transaction dates are not rewritten.
+
+Starting with the November 2026 ledger, signing in (or selecting a ledger month)
+creates any missing recurring-expense entries in the existing Supabase household
+document. Deterministic transaction IDs and per-entry generation records prevent
+duplicates across refreshes and devices. Previous months are not backfilled.
+Generated entries are marked unpaid until a user confirms payment in
+**고정지출 관리**; payment dates and recurrence settings can be changed for
+future months without rewriting existing transaction snapshots. No new database
+table or service is required.
+
+The two savings/pension contributions use the **저축·연금 납입** category. They
+remain part of total cash outflow, but are excluded from general-consumption
+statistics. They are not added to asset balances.
+
 Production readiness still requires configuring the Supabase Site URL /
 redirect URL, setting the authorized Supabase user UUID, and registering the
 Render server's actual outbound IP in Toss Securities Open API settings. API
