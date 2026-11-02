@@ -137,6 +137,7 @@
 			["pension-insurance", "연금보험료", "보험", 366660]
 		];
 		const defaultState = { cash: 0, accounts: [], holdings: [], transactions: [], pricesUpdated: null, stockPricesUpdated: null, stockEvaluation: null, fixedExpenseCycles: [], exchangeRate: null, exchangeRateUpdated: null, tossAccounts: [], tossAccountSeq: null, tossLastSyncAt: null };
+		const STOCK_PRICE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 		let state = loadState();
 		let activeView = "home";
 		let entryKind = "expense";
@@ -507,15 +508,15 @@
 			}
 		}
 		function startAppServices() {
-			if (startAppServices.started) return;
-			startAppServices.started = true;
-			if (state.holdings.length) refreshPrices();
-			setInterval(() => { if (state.holdings.length && !document.hidden) refreshPrices(); }, 30000);
+			if (!startAppServices.started) {
+				startAppServices.started = true;
+				if (state.holdings.length) refreshPrices();
+				setInterval(() => { if (state.holdings.length && !document.hidden) refreshPrices(); }, 30000);
+				document.addEventListener("visibilitychange", () => {
+					if (!document.hidden) refreshStockPricesIfDue();
+				});
+			}
 			refreshStockPricesIfDue();
-			setInterval(() => { if (!document.hidden) refreshStockPricesIfDue(); }, 60 * 1000);
-			document.addEventListener("visibilitychange", () => {
-				if (!document.hidden) refreshStockPricesIfDue();
-			});
 		}
 		function currentCloudMode() { return cloudReady && Boolean(cloudUser); }
 		function dateKey(date = new Date()) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`; }
@@ -605,25 +606,17 @@
 		function seoulDateKey(date = new Date()) {
 			return new Intl.DateTimeFormat("en-CA", { timeZone:"Asia/Seoul", year:"numeric", month:"2-digit", day:"2-digit" }).format(date);
 		}
-		function seoulMinutes(date = new Date()) {
-			const parts = new Intl.DateTimeFormat("en-GB", { timeZone:"Asia/Seoul", hour:"2-digit", minute:"2-digit", hourCycle:"h23" }).formatToParts(date);
-			return Number(parts.find(part => part.type === "hour")?.value) * 60 + Number(parts.find(part => part.type === "minute")?.value);
-		}
-		function nextSeoulEvaluationText() {
-			const now = new Date();
-			const seoulNow = new Date(now.getTime() + 9 * 60 * 60 * 1000);
-			let next = Date.UTC(seoulNow.getUTCFullYear(), seoulNow.getUTCMonth(), seoulNow.getUTCDate(), 10) - 9 * 60 * 60 * 1000;
-			if (next <= now.getTime()) next += 24 * 60 * 60 * 1000;
-			return new Intl.DateTimeFormat("ko-KR", { timeZone:"Asia/Seoul", month:"long", day:"numeric", hour:"2-digit", minute:"2-digit" }).format(new Date(next));
+		function stockPricesAreStale(now = Date.now()) {
+			const fetchedAt = Date.parse(state.stockEvaluation?.priceListRetrievedAt || state.stockPricesUpdated || "");
+			return !Number.isFinite(fetchedAt) || now - fetchedAt >= STOCK_PRICE_MAX_AGE_MS;
 		}
 		function stockEvaluationStatus() {
 			const evaluation = state.stockEvaluation;
-			const attemptedToday = evaluation?.lastAttemptAt && seoulDateKey(new Date(evaluation.lastAttemptAt)) === seoulDateKey();
-			if (evaluation?.lastAttemptError && attemptedToday) return `오늘 자동 평가 실패: ${evaluation.lastAttemptError} 지금 평가하기를 눌러 다시 시도할 수 있습니다.`;
-			if (!evaluation?.evaluatedAt) return `평가 기록 없음 · 브라우저 자동 평가 ${nextSeoulEvaluationText()} (한국시간). 브라우저가 닫혀 있으면 실행되지 않으며 다음 로그인 시 누락분을 다시 평가합니다.`;
-			const evaluatedDate = seoulDateKey(new Date(evaluation.evaluatedAt));
-			if (evaluatedDate !== seoulDateKey()) return `오늘 평가가 아직 없습니다 · 브라우저 자동 평가 ${nextSeoulEvaluationText()} (한국시간). 브라우저가 닫혀 있으면 실행되지 않으며 오전 10시 이후 로그인 시 누락분을 다시 평가합니다.`;
-			return `오늘 평가 완료 · 현재가 수신 ${evaluation.pricedCount}개 / ${evaluation.positionCount}개 · 다음 브라우저 자동 평가 ${nextSeoulEvaluationText()} (한국시간, 브라우저가 열려 있어야 실행)`;
+			if (evaluation?.lastAttemptError) return `최근 시세 자동 갱신 실패: ${evaluation.lastAttemptError} 지금 평가하기를 눌러 다시 시도할 수 있습니다.`;
+			if (!evaluation?.evaluatedAt) return "평가 기록 없음 · 로그인하거나 화면으로 돌아올 때 24시간 이상 지난 시세를 자동 갱신합니다.";
+			const evaluatedAt = new Date(evaluation.evaluatedAt).toLocaleString("ko-KR");
+			const ageMessage = stockPricesAreStale() ? "시세가 오래되어 로그인 또는 화면 복귀 시 갱신합니다." : "시세가 최근 24시간 이내에 갱신되었습니다.";
+			return `${ageMessage} · 최근 평가 ${evaluatedAt} · 현재가 수신 ${evaluation.pricedCount}개 / ${evaluation.positionCount}개`;
 		}
 		function renderStockQuoteDiagnostics(stocks) {
 			const evaluation = state.stockEvaluation;
@@ -1014,15 +1007,14 @@
 			} finally { stockRefreshInFlight = false; }
 		}
 		function refreshStockPricesIfDue() {
-			if (!state.holdings.some(item => item.type === "stock") || seoulMinutes() < 10 * 60) return;
-			const today = seoulDateKey();
-			const evaluatedAt = state.stockEvaluation?.evaluatedAt;
-			const attemptedAt = state.stockEvaluation?.lastAttemptAt;
-			if (evaluatedAt && seoulDateKey(new Date(evaluatedAt)) === today) return;
-			if (attemptedAt && seoulDateKey(new Date(attemptedAt)) === today && !state.stockEvaluation?.lastAttemptError) return;
+			if (!state.holdings.some(item => item.type === "stock")) return;
+			if (cloudConfigured && (!cloudReady || !cloudUser)) return;
+			if (!stockPricesAreStale()) return;
+			const attemptedAt = Date.parse(state.stockEvaluation?.lastAttemptAt || "");
+			if (Number.isFinite(attemptedAt) && Date.now() - attemptedAt < 15 * 60 * 1000) return;
 			if (stockLastAutoAttemptAt && Date.now() - stockLastAutoAttemptAt < 15 * 60 * 1000) return;
 			stockLastAutoAttemptAt = Date.now();
-			refreshStockPrices({ force:true, trigger:"scheduled-catch-up" });
+			refreshStockPrices({ force:true, trigger:"stale-on-entry" });
 		}
 		async function tossRequest(path) {
 			if (!cloudClient || !cloudReady) throw new Error("Supabase 가계부에 로그인한 뒤 이용해 주세요.");
